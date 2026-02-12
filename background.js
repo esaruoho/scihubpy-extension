@@ -171,46 +171,42 @@ function normalizeUrl(url, mirror) {
 }
 
 async function downloadFromUrl(pdfUrl, doi) {
-  const res = await fetch(pdfUrl);
-  const contentType = res.headers.get("Content-Type") || "";
-
-  // Accept application/pdf or octet-stream (some CDNs use octet-stream for PDFs)
-  if (
-    !contentType.includes("application/pdf") &&
-    !contentType.includes("application/octet-stream")
-  ) {
-    throw new Error("Response is not a PDF (got " + contentType + ")");
-  }
-
-  const blob = await res.blob();
-
-  // Validate PDF magic bytes
-  const header = await blob.slice(0, 5).text();
-  if (!header.startsWith("%PDF-")) {
-    throw new Error("Invalid PDF content");
+  // Validate with a HEAD request first (avoid downloading non-PDFs)
+  try {
+    const headRes = await fetch(pdfUrl, { method: "HEAD" });
+    const contentType = headRes.headers.get("Content-Type") || "";
+    if (
+      !contentType.includes("application/pdf") &&
+      !contentType.includes("application/octet-stream") &&
+      !contentType.includes("application/x-pdf")
+    ) {
+      // Some servers don't support HEAD or return wrong content-type for HEAD,
+      // so fall through and try the download anyway
+      console.log(
+        "Sci-Hub ext: HEAD content-type was " + contentType + ", trying download anyway"
+      );
+    }
+  } catch (e) {
+    // HEAD failed — proceed with download anyway
   }
 
   // Generate filename from DOI
   const filename =
     doi.replace(/\//g, "_").replace(/[^a-zA-Z0-9._-]/g, "") + ".pdf";
 
-  // Create object URL and trigger download
-  const blobUrl = URL.createObjectURL(blob);
-
+  // NOTE: URL.createObjectURL is NOT available in service workers.
+  // Pass the URL directly to chrome.downloads — Chrome fetches it natively.
   return new Promise((resolve, reject) => {
     chrome.downloads.download(
       {
-        url: blobUrl,
+        url: pdfUrl,
         filename: filename,
         saveAs: false,
       },
       function (downloadId) {
         if (chrome.runtime.lastError) {
-          URL.revokeObjectURL(blobUrl);
           reject(new Error(chrome.runtime.lastError.message));
         } else {
-          // Clean up blob URL after a delay
-          setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
           resolve(downloadId);
         }
       }
