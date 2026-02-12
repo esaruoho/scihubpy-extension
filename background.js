@@ -1,6 +1,9 @@
 // Sci-Hub PDF Downloader — Background Service Worker
 // Receives DOI from content script, fetches from Sci-Hub, parses PDF URL,
 // downloads the PDF directly.
+//
+// NOTE: DOMParser is NOT available in Manifest V3 service workers.
+// All HTML parsing uses regex instead.
 
 // Sci-Hub mirrors in priority order
 const SCIHUB_MIRRORS = [
@@ -70,30 +73,38 @@ async function findPDFUrl(mirror, doi) {
     throw new Error("Cloudflare challenge");
   }
 
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(html, "text/html");
+  // --- Regex-based HTML parsing (DOMParser not available in service workers) ---
 
-  // Try iframe (sci-hub.vg)
-  const iframe = doc.querySelector("iframe[src]");
-  if (iframe) {
-    return normalizeUrl(iframe.getAttribute("src"), mirror);
+  // Try iframe src (sci-hub.vg)
+  const iframeMatch = html.match(/<iframe[^>]+src\s*=\s*["']([^"']+)["']/i);
+  if (iframeMatch) {
+    return normalizeUrl(iframeMatch[1], mirror);
   }
 
   // Try embed with type=application/pdf (sci-hub.al, sci-hub.mk)
-  let embed = doc.querySelector('embed[type="application/pdf"][src]');
-  if (embed) {
-    return normalizeUrl(embed.getAttribute("src"), mirror);
+  const embedPdfMatch = html.match(
+    /<embed[^>]+type\s*=\s*["']application\/pdf["'][^>]+src\s*=\s*["']([^"']+)["']/i
+  );
+  if (embedPdfMatch) {
+    return normalizeUrl(embedPdfMatch[1], mirror);
+  }
+  // Also try embed where src comes before type
+  const embedPdfMatch2 = html.match(
+    /<embed[^>]+src\s*=\s*["']([^"']+)["'][^>]+type\s*=\s*["']application\/pdf["']/i
+  );
+  if (embedPdfMatch2) {
+    return normalizeUrl(embedPdfMatch2[1], mirror);
   }
   // Fallback: any embed with src
-  embed = doc.querySelector("embed[src]");
-  if (embed) {
-    return normalizeUrl(embed.getAttribute("src"), mirror);
+  const embedMatch = html.match(/<embed[^>]+src\s*=\s*["']([^"']+)["']/i);
+  if (embedMatch) {
+    return normalizeUrl(embedMatch[1], mirror);
   }
 
   // Try object data (sci-hub.ru)
-  const obj = doc.querySelector("object[data]");
-  if (obj) {
-    const dataUrl = obj.getAttribute("data");
+  const objectMatch = html.match(/<object[^>]+data\s*=\s*["']([^"']+)["']/i);
+  if (objectMatch) {
+    const dataUrl = objectMatch[1];
     if (
       dataUrl.includes(".pdf") ||
       dataUrl.includes("/pdf/") ||
@@ -104,25 +115,37 @@ async function findPDFUrl(mirror, doi) {
   }
 
   // Try button onclick with location.href
-  const buttons = doc.querySelectorAll("button[onclick]");
-  for (const btn of buttons) {
-    const onclick = btn.getAttribute("onclick");
-    const match = onclick.match(
+  const buttonMatches = html.matchAll(
+    /<button[^>]+onclick\s*=\s*["']([^"']+)["']/gi
+  );
+  for (const bm of buttonMatches) {
+    const onclick = bm[1];
+    const locMatch = onclick.match(
       /location\.href\s*=\s*['"]([^'"]+\.pdf[^'"]*)/
     );
-    if (match) {
-      return normalizeUrl(match[1].replace(/\\\//g, "/"), mirror);
+    if (locMatch) {
+      return normalizeUrl(locMatch[1].replace(/\\\//g, "/"), mirror);
     }
   }
 
   // Try script tags for PDF URLs
-  const scripts = doc.querySelectorAll("script");
-  for (const script of scripts) {
-    const txt = script.textContent || "";
-    const match = txt.match(/(https?:\/\/[^\s"<>']+\.pdf[^\s"<>']*)/);
-    if (match) {
-      return match[1];
+  const scriptMatches = html.matchAll(
+    /<script[^>]*>([\s\S]*?)<\/script>/gi
+  );
+  for (const sm of scriptMatches) {
+    const txt = sm[1];
+    const pdfMatch = txt.match(/(https?:\/\/[^\s"<>']+\.pdf[^\s"<>']*)/);
+    if (pdfMatch) {
+      return pdfMatch[1];
     }
+  }
+
+  // Try any src/href containing .pdf as last resort
+  const anyPdfMatch = html.match(
+    /(?:src|href|data)\s*=\s*["']((?:https?:)?\/\/[^"']+\.pdf[^"']*)/i
+  );
+  if (anyPdfMatch) {
+    return normalizeUrl(anyPdfMatch[1], mirror);
   }
 
   return null;
@@ -131,6 +154,8 @@ async function findPDFUrl(mirror, doi) {
 function normalizeUrl(url, mirror) {
   if (!url) return null;
   url = url.trim();
+  // Unescape HTML entities
+  url = url.replace(/&amp;/g, "&");
   // Strip fragments
   url = url.replace(/#.*$/, "");
 
@@ -146,11 +171,14 @@ function normalizeUrl(url, mirror) {
 }
 
 async function downloadFromUrl(pdfUrl, doi) {
-  // Verify it's actually a PDF by fetching the first few bytes
   const res = await fetch(pdfUrl);
   const contentType = res.headers.get("Content-Type") || "";
 
-  if (!contentType.includes("application/pdf")) {
+  // Accept application/pdf or octet-stream (some CDNs use octet-stream for PDFs)
+  if (
+    !contentType.includes("application/pdf") &&
+    !contentType.includes("application/octet-stream")
+  ) {
     throw new Error("Response is not a PDF (got " + contentType + ")");
   }
 
@@ -163,7 +191,8 @@ async function downloadFromUrl(pdfUrl, doi) {
   }
 
   // Generate filename from DOI
-  const filename = doi.replace(/\//g, "_").replace(/[^a-zA-Z0-9._-]/g, "") + ".pdf";
+  const filename =
+    doi.replace(/\//g, "_").replace(/[^a-zA-Z0-9._-]/g, "") + ".pdf";
 
   // Create object URL and trigger download
   const blobUrl = URL.createObjectURL(blob);

@@ -83,7 +83,30 @@
       }
     }
 
-    // 4. Visible DOI text on page (last resort, limited scope)
+    // 4. Links to doi.org (catches IEEE and many other publishers)
+    const doiLinks = document.querySelectorAll(
+      'a[href*="doi.org/10."], a[href*="dx.doi.org/10."]'
+    );
+    for (const link of doiLinks) {
+      const href = link.getAttribute("href") || "";
+      const match = href.match(
+        /(?:dx\.)?doi\.org\/(10\.\d{4,9}\/[^\s?#"']+)/
+      );
+      if (match) return match[1];
+    }
+
+    // 5. DOI in JavaScript objects / inline scripts (IEEE xplGlobal, etc.)
+    const scripts = document.querySelectorAll("script:not([src])");
+    for (const script of scripts) {
+      const txt = script.textContent || "";
+      // Match "doi":"10.xxxx/..." or 'doi':'10.xxxx/...' or doi: "10.xxxx/..."
+      const doiStringMatch = txt.match(
+        /["']?doi["']?\s*[:=]\s*["'](10\.\d{4,9}\/[^"']+)["']/i
+      );
+      if (doiStringMatch) return doiStringMatch[1];
+    }
+
+    // 6. Visible DOI text on page (last resort, limited scope)
     // Only check specific containers to avoid false positives
     const containers = document.querySelectorAll(
       [
@@ -230,5 +253,15 @@
     init();
   } else {
     window.addEventListener("load", init);
+  }
+
+  // Retry after a delay for SPAs that load metadata dynamically
+  // (IEEE, some Elsevier pages, etc.)
+  if (!document.getElementById("scihub-ext-btn")) {
+    setTimeout(function () {
+      if (!document.getElementById("scihub-ext-btn")) {
+        init();
+      }
+    }, 2000);
   }
 })();
